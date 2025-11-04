@@ -147,7 +147,7 @@ class power2D:
                 vmin = value_range[0]
                 vmax = value_range[1]
             im = plt.imshow(p,
-                            origin="down",
+                            origin="lower",
                             extent=[np.min(self.lx), np.max(self.lx), np.min(self.ly), np.max(self.ly)],
                             aspect="equal",
                             vmin=vmin,
