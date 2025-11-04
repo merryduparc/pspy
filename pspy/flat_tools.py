@@ -127,7 +127,7 @@ class power2D:
                     if len(draw_circles_at_ell) < 5:
                         plt.text(ell * np.cos(np.pi / 4.),
                                    ell * np.sin(np.pi / 4.),
-                                   "%d" % np.int(ell),
+                                   "%d" % np.int8(ell),
                                    rotation=-45,
                                    horizontalalignment="center",
                                    verticalalignment="bottom",
