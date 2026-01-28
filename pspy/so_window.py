@@ -158,6 +158,13 @@ def get_spinned_windows(w, lmax, niter):
     return w1_plus, w1_minus, w2_plus, w2_minus
 
 
+
+def get_survey_solid_angle_ndmap(window:enmap.ndmap):
+    pixsize_map = window.pixsizemap()
+    w2 = np.sum(window**2 * pixsize_map)
+    w4 = np.sum(window**4 * pixsize_map)
+    return w2**2 / w4
+
 def get_survey_solid_angle(window, naive=False):
     """
     return Omega, the effective solid angle convered by the window function
@@ -174,19 +181,29 @@ def get_survey_solid_angle(window, naive=False):
       if True just compute the area covered by  the non-zero pixels
     """
     
-    pixsize_map = window.data.pixsizemap()
 
-    if naive == True:
+    if naive:
         binary = window.copy()
         binary.data[binary.data != 0] = 1
-        Omega = np.sum(binary.data *  pixsize_map)
-    else:
-        def get_w(window, order):
+        if window.pixel == "CAR":
             pixsize_map = window.data.pixsizemap()
-            return  np.sum(window.data ** order * pixsize_map)
-
-        w2 = get_w(window, 2)
-        w4 =  get_w(window, 4)
-        Omega = w2 ** 2 / w4
-    
+            Omega = np.sum(binary.data *  pixsize_map)
+        elif window.pixel == "CAR":
+            pixarea = hp.nside2pixarea(window.nside)
+            Omega = np.sum(binary.data) * pixarea
+    else:
+        if window.pixel == "CAR":
+            Omega = get_survey_solid_angle_ndmap(window=window.data)
+        elif window.pixel == "HEALPIX":
+            pixarea = hp.nside2pixarea(window.nside)
+            w2 = np.sum(window**2)
+            w4 = np.sum(window**4)
+            Omega = w2**2 / w4 * pixarea
     return Omega
+
+def get_fsky_ndmap(window: enmap.ndmap):
+    Omega = get_survey_solid_angle_ndmap(window=window)
+    return Omega / (4 * np.pi)
+
+def get_fsky(window):
+    return get_survey_solid_angle(window) / (4 * np.pi)
