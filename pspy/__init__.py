@@ -14,6 +14,7 @@ from pspy import (
     so_spectra,
     so_window,
     sph_tools,
+    so_2dspec,
 )
 
 try:

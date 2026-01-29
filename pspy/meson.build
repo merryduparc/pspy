@@ -15,6 +15,7 @@ python_sources = [
   'so_spectra.py',
   'so_window.py',
   'sph_tools.py',
+  'so_2dspec.py',
 ]
 py.install_sources(
   python_sources,
