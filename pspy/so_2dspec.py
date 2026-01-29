@@ -88,16 +88,6 @@ class So_Spec2D:
     def copy(self):
         return deepcopy(self)
 
-    def clean_attributes(self, attr_list: list[str]):
-        """
-        Delete attributes from the instance based on the provided list of names.
-        Used to save memory if needed
-        """
-
-        for attr in attr_list:
-            if hasattr(self, attr):
-                delattr(self, attr)
-
     def get_ellmaps(self):
         """
         Compute useful stuff (modlmap, thetamap etc.)
@@ -170,7 +160,10 @@ class So_Spec2D:
         self.llims = (min(self.lx), max(self.lx), min(self.ly), max(self.ly))
         self.thetamap = np.rad2deg(np.arctan2(self.lymap, self.lxmap))
 
-    def get_kmaps(self, normalize="phys"):
+    def get_kmaps(self):
+        """
+        Computes k-space maps from enmaps.
+        """
 
         # Compute TQU kmaps and map them into self.kmap dict
         kmaps_pixell = [
@@ -193,23 +186,30 @@ class So_Spec2D:
             for i in range(self.Nsplits)
         ]
 
-    def get_win_spec(self, normalize="phys", ell_index=None):
-        # kmap_win = np.fft.fft2(
+    def get_win_spec(self, ell_index=None):
+        """
+        Computes the window power map. Only uses first input window for now.
+        """
         kmap_win = (
             enmap.fft(self.windows[0], normalize="phys")
-        )  # TODO: make this work for all windows
+        )  # TODO: make this work for different windows
         self.pow_win = (kmap_win * np.conj(kmap_win)).real
-        fac = 1.0 if ell_index is None else (self.modlmap**ell_index / (2 * np.pi))
+        fac = 1.0 if ell_index is None else (self.modlmap**ell_index)
         fac *= (self.patch_area / (4 * np.pi))
         self.pow_win *= fac
-
-    def get_pixel_window(self):  # TODO: problem with trimmed ?
-        pixW = np.sinc(self.lx[self.ix] * self.pixScaleX / (2.0 * np.pi)) * np.sinc(
-            self.ly[self.iy] * self.pixScaleY / (2.0 * np.pi)
-        )
-        pixW = pixW**2
+        
+    # TODO make this one work
+    # def get_pixel_window(self): 
+    #     pixW = np.sinc(self.lx[self.ix] * self.pixScaleX / (2.0 * np.pi)) * np.sinc(
+    #         self.ly[self.iy] * self.pixScaleY / (2.0 * np.pi)
+    #     )
+    #     pixW = pixW**2
 
     def get_2d_spectra(self, ell_index=None, skip_useless=True):
+        """
+        From kmaps, computes all power maps from kmaps combinations.
+        Then makes mean of the cross and auto, and a noise power map.
+        """
         self.pow_crosses: dict[str, list[enmap.ndmap]] = (
             {}
         )  # stores all individual cross
@@ -246,7 +246,7 @@ class So_Spec2D:
                 self.pow_auto[X + Y] - self.pow[X + Y]
             ) / self.Nsplits
 
-            fac = 1.0 if ell_index is None else self.modlmap**ell_index / (2 * np.pi)
+            fac = 1.0 if ell_index is None else self.modlmap**ell_index
             fac *= (self.patch_area / (4 * np.pi))
             self.pow[X + Y] *= fac
             self.pow_auto[X + Y] *= fac
@@ -264,7 +264,7 @@ class So_Spec2D:
         downgrade=2,
         **args,
     ):
-        """Plots self.pow by default.
+        """Plots a given map, self.pow by default. **args goes into imshow.
         Also return the imshow() mappable (for colorbar etc.)
         """
 
@@ -273,10 +273,10 @@ class So_Spec2D:
         if type(map_to_plot) == dict:
             map_to_plot = map_to_plot[comp].copy()
 
-        if ell_index != 0:
-            map_to_plot *= self.modlmap ** (2)
+        if ell_index is not None:
+            map_to_plot *= self.modlmap ** ell_index
 
-        if downgrade != 1:
+        if downgrade != 1 and downgrade is not None:
             map_to_plot = map_to_plot.downgrade(downgrade)
 
         if log:
@@ -285,6 +285,7 @@ class So_Spec2D:
         plot = ax_to_plot.imshow(
             np.fft.fftshift(map_to_plot.real.astype(np.float64)),
             extent=self.llims,
+            origin='lower',
             **args,
         )
 
@@ -297,13 +298,7 @@ class So_Spec2D:
         ax_to_plot.set_ylabel(r"$\ell_y$")
         return plot
 
-    def plot(self, **args):
-        """
-        Plots the pow map using enplot, much slower than axplot()
-        """
-        enplot.pshow(enmap.enmap(np.fft.fftshift(self.pow), self.lwcs), **args)
-
-    def radial_binned_map(
+    def radial_binned_map(      # TODO : change bin_edges for a binning_file
         self,
         bin_edges: np.ndarray,
         which_map: dict[str, enmap.ndmap] = None,
@@ -336,9 +331,12 @@ class So_Spec2D:
             rad_binned_map[comp] = (rbin_map / bincount)[bin_map]
         return rad_binned_map
 
-    def radial_binned_1d_spec(
+    def radial_binned_1d_spec(      # TODO : change bin_edges for a binning_file
         self, bin_edges, which_map=None, theta_range=None
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """
+        makes a 1D power spectra from power map
+        """
 
         if type(which_map) != dict and which_map is not None:
             which_map = {"I": which_map}
@@ -371,6 +369,9 @@ class So_Spec2D:
         return bins_center, rad_bin_spec
 
     def subtract_rad_profile(self, bin_edges, inplace=False):
+        """
+        Subtract the radial profile of a map (using self.radial_binned_map)
+        """
         rad_binned_map = self.radial_binned_map(bin_edges)
         pow_subtracted = self.pow - rad_binned_map
         if not inplace:
@@ -384,6 +385,7 @@ class So_Spec2D:
 
 
 def make_1d_spectra_and_save(spec2d: So_Spec2D, bin_edges, theta_ranges, filename):
+    # TODO: change this so it save with so_spectra.write_ps instead
     ls = (bin_edges[1:] + bin_edges[:-1]) / 2
     # Start with saving 1d radial power spectra and noise spectra
     ps_full = {}
@@ -430,8 +432,9 @@ def read_so_2dspec_pickle(filename: str):
         return pickle.load(f)
 
 
-def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float):
-
+def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float) -> dict[np.ndarray]:
+    """Computes the sums of binning maps times window spec using a fortran routine
+    """
     bin_low, bin_high, bin_cent, bin_size = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
 
     spec2d_wide = spec2d.copy()
@@ -516,7 +519,7 @@ def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float):
     return powsum_maps
 
 
-def get_trig_M_arrays(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_file: str, lmax: float):
+def get_trig_M_arrays(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_file: str, lmax: float) -> np.ndarray:
     
     bin_low, bin_high, bin_cent, bin_size = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
 
@@ -546,7 +549,7 @@ def get_trig_M_arrays(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_fi
     
     return mArrays
 
-def get_mode_coupling_2D(mArrays, spec2d):
+def get_mode_coupling_2D(mArrays, spec2d) -> np.ndarray:
 
     n = len(mArrays['0'])
 
