@@ -74,7 +74,6 @@ class So_Spec2D:
         self,
         maps: list[enmap.ndmap],
         windows: list[enmap.ndmap] = None,
-        normalize: str = "phys",
         ell_index: float = None,
     ):
         self.maps = maps
@@ -82,7 +81,7 @@ class So_Spec2D:
             self.maps = [maps * win for (maps, win) in zip(maps, windows)]
         self.windows = windows
         self.get_ellmaps()
-        self.get_kmaps(normalize=normalize)
+        self.get_kmaps()
         self.get_2d_spectra(ell_index=ell_index)
 
     def copy(self):
