@@ -159,19 +159,25 @@ def get_spinned_windows(w, lmax, niter):
 
 
 
-def get_survey_solid_angle_ndmap(window:enmap.ndmap):
+def get_survey_solid_angle_ndmap(window:enmap.ndmap) -> float:
+    """
+    from a ndmap object, return Omega, the effective solid angle convered by the window function
+    we use the window correction as displayed in equation 17 of https://arxiv.org/pdf/astro-ph/0105302.pdf
+    
+    Parameters
+    ----------
+    window: ``enmap.ndmap``
+      map of the window function
+    """
     pixsize_map = window.pixsizemap()
     w2 = np.sum(window**2 * pixsize_map)
     w4 = np.sum(window**4 * pixsize_map)
     return w2**2 / w4
 
-def get_survey_solid_angle(window, naive=False):
+def get_survey_solid_angle(window, naive=False) -> float:
     """
-    return Omega, the effective solid angle convered by the window function
+    from a so_map object, return Omega, the effective solid angle convered by the window function
     we use the window correction as displayed in equation 17 of https://arxiv.org/pdf/astro-ph/0105302.pdf
-    to get f_sky just do:
-    
-    fsky = Omega / (4 * np.pi)
     
     Parameters
     ----------
@@ -181,7 +187,6 @@ def get_survey_solid_angle(window, naive=False):
       if True just compute the area covered by  the non-zero pixels
     """
     
-
     if naive:
         binary = window.copy()
         binary.data[binary.data != 0] = 1
@@ -201,9 +206,30 @@ def get_survey_solid_angle(window, naive=False):
             Omega = w2**2 / w4 * pixarea
     return Omega
 
-def get_fsky_ndmap(window: enmap.ndmap):
+def get_fsky_ndmap(window: enmap.ndmap) -> float:
+    """
+    from a ndmap object, return fsky, the effective sky fraction convered by the window function
+    we use the window correction as displayed in equation 17 of https://arxiv.org/pdf/astro-ph/0105302.pdf
+    
+    Parameters
+    ----------
+    window: ``enmap.ndmap``
+      map of the window function
+    """
     Omega = get_survey_solid_angle_ndmap(window=window)
     return Omega / (4 * np.pi)
 
-def get_fsky(window):
-    return get_survey_solid_angle(window) / (4 * np.pi)
+def get_fsky(window, naive=False) -> float:
+    """
+    from a so_map object, return fsky, the effective sky fraction convered by the window function
+    we use the window correction as displayed in equation 17 of https://arxiv.org/pdf/astro-ph/0105302.pdf
+    
+    Parameters
+    ----------
+    window: ``so_map``
+      map of the window function
+    naive: boolean
+      if True just compute the area covered by  the non-zero pixels
+    """
+    Omega = get_survey_solid_angle(window=window, naive=naive)
+    return Omega / (4 * np.pi)
