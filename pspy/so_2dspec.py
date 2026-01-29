@@ -7,17 +7,12 @@ import numpy as np
 from matplotlib import pyplot as plt
 from copy import deepcopy
 import pickle
+import fortran
 import itertools
 from astropy import wcs
-
-
-def get_fsky(window: enmap.ndmap):
-    pixsize_map = window.pixsizemap()
-    w2 = np.sum(window**2 * pixsize_map)
-    w4 = np.sum(window**4 * pixsize_map)
-    Omega = w2**2 / w4
-    return Omega / (4 * np.pi)
-
+from tqdm import tqdm
+from pspy.so_window import get_survey_solid_angle_ndmap, get_fsky_ndmap
+from pspy.pspy_utils import read_binning_file
 
 def test_same_geometry(enmap_1, enmap_2):
     return enmap_1.shape == enmap_2.shape  # TODO : also check wcs
@@ -119,41 +114,10 @@ class So_Spec2D:
         self.lwcs = enmap.lwcs(self.shape, self.wcs)
         self.llims = (min(self.lx), max(self.lx), min(self.ly), max(self.ly))
         self.thetamap = np.rad2deg(np.arctan2(self.lymap, self.lxmap))
-        # self.xy0, self.xy1 = self.wcs.all_pix2world(0, 0, 0), self.wcs.all_pix2world(
-        #     self.shape[0] - 1, self.shape[1] - 1, 0
-        # )
-        # if self.xy0[0] > self.xy1[0]:
-        #     print('sup')
-        #     self.pixscale_x = (
-        #         np.abs(self.xy1[0] - self.xy0[0])
-        #         / self.shape[0]
-        #         * np.pi
-        #         / 180.0
-        #         * np.cos(np.pi / 180.0 * 0.5 * (self.xy0[1] + self.xy1[1]))
-        #     )
-        # else:
-        #     print('inf')
-        #     self.pixscale_x = (
-        #         np.abs((360.0 - self.xy1[0]) + self.xy0[0])
-        #         / self.shape[0]
-        #         * np.pi
-        #         / 180.0
-        #         * np.cos(np.pi / 180.0 * 0.5 * (self.xy0[1] + self.xy1[1]))
-        #     )
-        # self.pixscale_y = np.abs(self.xy1[1] - self.xy0[1]) / self.shape[1] * np.pi / 180.0
-        self.pixscale_x, self.pixscale_y = self.wcs.wcs.cdelt
-        self.pixscale_x *= np.pi / 180
-        self.pixscale_y *= np.pi / 180
-        self.area = (
-            self.shape[0]
-            * self.shape[1]
-            * abs(self.pixscale_x)
-            * abs(self.pixscale_y)
-            # * (180 / np.pi) ** 2
-        )
-        self.fsky = self.area / (4 * np.pi)
-        # self.fsky = get_fsky(window=self.windows[0])
-        # self.area = self.fsky * (4 * np.pi)
+        self.patch_fsky = get_fsky_ndmap(self.windows[0] * 0. + 1.)
+        self.patch_area = get_survey_solid_angle_ndmap(self.windows[0] * 0. + 1.)
+        self.fsky = get_fsky_ndmap(self.windows[0])
+        self.area = get_survey_solid_angle_ndmap(self.windows[0])
 
     def trim_at_ell(self, ell_trim):
         """
@@ -236,7 +200,7 @@ class So_Spec2D:
         )  # TODO: make this work for all windows
         self.pow_win = (kmap_win * np.conj(kmap_win)).real
         fac = 1.0 if ell_index is None else (self.modlmap**ell_index / (2 * np.pi))
-        fac *= (self.area / (4 * np.pi))
+        fac *= (self.patch_area / (4 * np.pi))
         self.pow_win *= fac
 
     def get_pixel_window(self):  # TODO: problem with trimmed ?
@@ -248,11 +212,11 @@ class So_Spec2D:
     def get_2d_spectra(self, ell_index=None, skip_useless=True):
         self.pow_crosses: dict[str, list[enmap.ndmap]] = (
             {}
-        )  # stores all individual spectra
+        )  # stores all individual cross
         self.pow_autos: dict[str, list[enmap.ndmap]] = {}  # stores all indivual auto
         self.pow: dict[str, enmap.ndmap] = {}  # mean of cross spectra
         self.pow_auto: dict[str, enmap.ndmap] = {}  # mean of auto spectra
-        self.pow_noise: dict[str, enmap.ndmap] = {}  # auto - cross
+        self.pow_noise: dict[str, enmap.ndmap] = {}  # mean auto - mean cross
         for X, Y in itertools.product("TQUEB", repeat=2):
             if skip_useless & (
                 ((X in "QU") & (Y in "EB")) | ((X in "EB") & (Y in "QU"))
@@ -275,7 +239,7 @@ class So_Spec2D:
                     self.pow_autos[X + Y].append(pow_iter)
                     self.pow_auto[X + Y] += pow_iter
 
-            # Divide by the number of iterations since we add all iterations
+            # Divide by the number of iterations to obtain the mean
             self.pow[X + Y] /= self.Nsplits * (self.Nsplits - 1) / 2
             self.pow_auto[X + Y] /= self.Nsplits
             self.pow_noise[X + Y] = (
@@ -283,7 +247,7 @@ class So_Spec2D:
             ) / self.Nsplits
 
             fac = 1.0 if ell_index is None else self.modlmap**ell_index / (2 * np.pi)
-            fac *= (self.area / (4 * np.pi))
+            fac *= (self.patch_area / (4 * np.pi))
             self.pow[X + Y] *= fac
             self.pow_auto[X + Y] *= fac
             self.pow_noise[X + Y] *= fac
@@ -381,7 +345,7 @@ class So_Spec2D:
         smap_dict: dict[str, enmap.ndmap] = self.pow if which_map is None else which_map
 
         # Define a mask in kspace using theta map
-        theta_range = [0, 360] if theta_range is None else theta_range
+        theta_range = [0, 180] if theta_range is None else theta_range
         theta_mask = np.where(
             (theta_range[0] <= self.thetamap.copy().flatten())
             & (theta_range[1] > self.thetamap.copy().flatten())
@@ -419,15 +383,15 @@ class So_Spec2D:
             pickle.dump(self, f)
 
 
-def make_1d_spectra_and_save(kspec: So_Spec2D, bin_edges, theta_ranges, filename):
+def make_1d_spectra_and_save(spec2d: So_Spec2D, bin_edges, theta_ranges, filename):
     ls = (bin_edges[1:] + bin_edges[:-1]) / 2
     # Start with saving 1d radial power spectra and noise spectra
     ps_full = {}
     ps_full_noise = {}
     for comp in ["T", "Q", "U"]:
-        ps_full[comp] = kspec.radial_binned_1d_spec(bin_edges=bin_edges, TQU=comp)[1]
-        ps_full_noise[comp] = kspec.radial_binned_1d_spec(
-            bin_edges=bin_edges, which_map=kspec.pow_noise, TQU=comp
+        ps_full[comp] = spec2d.radial_binned_1d_spec(bin_edges=bin_edges, TQU=comp)[1]
+        ps_full_noise[comp] = spec2d.radial_binned_1d_spec(
+            bin_edges=bin_edges, which_map=spec2d.pow_noise, TQU=comp
         )[1]
 
     # Make 1d radial power and noise spectra for given theta_ranges
@@ -438,12 +402,12 @@ def make_1d_spectra_and_save(kspec: So_Spec2D, bin_edges, theta_ranges, filename
         ps_thetas[range_name] = {}
         ps_thetas_noise[range_name] = {}
         for comp in ["T", "Q", "U"]:
-            ps_thetas[range_name][comp] = kspec.radial_binned_1d_spec(
+            ps_thetas[range_name][comp] = spec2d.radial_binned_1d_spec(
                 bin_edges=bin_edges, TQU=comp, theta_range=theta_range
             )[1]
-            ps_thetas_noise[range_name][comp] = kspec.radial_binned_1d_spec(
+            ps_thetas_noise[range_name][comp] = spec2d.radial_binned_1d_spec(
                 bin_edges=bin_edges,
-                which_map=kspec.pow_noise,
+                which_map=spec2d.pow_noise,
                 TQU=comp,
                 theta_range=theta_range,
             )[1]
@@ -461,132 +425,148 @@ def make_1d_spectra_and_save(kspec: So_Spec2D, bin_edges, theta_ranges, filename
     with open(filename, "wb") as f:
         pickle.dump(save_dict, f)
 
-
-def read_so_kspec_pickle(filename: str):
+def read_so_2dspec_pickle(filename: str):
     with open(filename, "rb") as f:
         return pickle.load(f)
 
 
-# def from_enmap(enmap_: enmap.ndmap) -> So_Spec2D:
-#     kspec = So_Spec2D()
+def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float):
 
-#     # some geometry and misc
-#     kspec.shape = (enmap_.shape[-2], enmap_.shape[-1])
-#     kspec.ncomp = 3 if enmap_.shape[0] == 3 else 1
-#     kspec.Nsplits = 1
-#     kspec.wcs = enmap_.wcs
-#     kspec.ly, kspec.lx = enmap_.laxes()
-#     kspec.lymap, kspec.lxmap = enmap_.lmap()
-#     kspec.modlmap = enmap_.modlmap().astype(np.float32)
-#     kspec.lwcs = enmap.lwcs(enmap_.shape, enmap_.wcs)
-#     kspec.llims = (min(kspec.lx), max(kspec.lx), min(kspec.ly), max(kspec.ly))
-#     kspec.thetamap = np.rad2deg(np.arctan2(kspec.lymap, kspec.lxmap))
+    bin_low, bin_high, bin_cent, bin_size = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
 
-#     # compute kmaps and kspecs
-#     kmap = enmap.fft(enmap_)
-#     kspec.kmaps = [kmap]
-#     kspec.pow = (kmap * np.conj(kmap)).real
-#     kspec.pow *= kspec.modlmap**2  # D_ell because why not
+    spec2d_wide = spec2d.copy()
+    spec2d_wide.trim_at_ell(2 * lmax + 500)
 
-#     return kspec
+    pow_shifted = np.fft.fftshift(spec2d_wide.pow_win.astype(np.float64))
+    lx_shifted = np.fft.fftshift(spec2d_wide.lx.copy())
+    ly_shifted = np.fft.fftshift(spec2d_wide.ly.copy())
+
+    lx = spec2d_wide.lx.copy()
+    ly = spec2d_wide.ly.copy()
+
+    modlmap = spec2d_wide.modlmap.copy()
+    
+    spec2d_trim = spec2d.copy()
+    spec2d_trim.trim_at_ell(lmax)
+
+    ang=np.fft.fftshift(np.arctan2(spec2d_trim.lymap,spec2d_trim.lxmap))
+    cos_array=np.cos(-2*ang)
+    sin_array=np.sin(-2*ang)
+
+    pMMaps_0 = np.zeros((len(bin_low), len(spec2d_trim.ly), len(spec2d_trim.lx)), dtype=np.float64)
+    pMMaps_cos = pMMaps_0.copy()
+    pMMaps_sin =  pMMaps_0.copy()
+    pMMaps_cos2 =  pMMaps_0.copy()
+    pMMaps_sin2 =  pMMaps_0.copy()
+    pMMaps_cossin =  pMMaps_0.copy()
+
+    for ibin in tqdm(range(len(bin_low)), desc='Looping over bins ', smoothing=1.):
+
+        location = np.where((modlmap >= bin_low[ibin]) & (modlmap <= bin_high[ibin]))
+
+        binMap = pow_shifted.copy() * 0.
+        binMap[location] = 1. # shifed
+        sumBin = binMap.sum()
+        
+        binMap0 = spec2d_trim.pow_win.copy() * 0.
+        binMap_cos = binMap0.copy()
+        binMap_sin = binMap0.copy()
+        binMap_cos2 = binMap0.copy()
+        binMap_sin2 = binMap0.copy()
+        binMap_cossin = binMap0.copy()
+        
+        fortran.fortran(
+                iy=location[0],  # no shift, no trim
+                ix=location[1],  # no shift, no trim
+                bin_ly=ly,  # no shift, no trim
+                bin_lx=lx,  # no shift, no trim
+                pmshift_11=pow_shifted.T,  # shifted, no trim
+                pmshift_12=pow_shifted.T,  # shifted, no trim
+                pmshift_22=pow_shifted.T,  # shifted, no trim
+                cos_array=cos_array.T,
+                sin_array=sin_array.T,
+                bmap=None,
+                bmap0=binMap0.T,  # shifted, trimmed
+                bmap_cos=binMap_cos.T,
+                bmap_sin=binMap_sin.T,
+                bmap_cos2=binMap_cos2.T,
+                bmap_sin2=binMap_sin2.T,
+                bmap_cossin=binMap_cossin.T,
+                phlx=lx_shifted,  # shifted, no trim
+                phly=ly_shifted,  # shifted, no trim
+                type_bn=0,
+                trimatl=lmax,
+            )
+        
+        pMMaps_0[ibin] = binMap0 / sumBin
+        pMMaps_cos[ibin] = binMap_cos/sumBin
+        pMMaps_sin[ibin] = binMap_sin/sumBin
+        pMMaps_cos2[ibin] = binMap_cos2/sumBin
+        pMMaps_sin2[ibin] = binMap_sin2/sumBin
+        pMMaps_cossin[ibin] = binMap_cossin/sumBin
+
+    powsum_maps = {
+        '0': pMMaps_0,
+        'cos': pMMaps_cos,
+        'sin': pMMaps_sin,
+        'cos2': pMMaps_cos2,
+        'sin2': pMMaps_sin2,
+        'cossin': pMMaps_cossin,
+    }
+    return powsum_maps
 
 
-# def from_enmap_list(enmap_list: list[enmap.ndmap]) -> So_Spec2D:
-#     N_splits = len(enmap_list)
+def get_trig_M_arrays(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_file: str, lmax: float):
+    
+    bin_low, bin_high, bin_cent, bin_size = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
 
-#     kspec = So_Spec2D()
-#     enmap_template = enmap_list[0]  # assume all map should have same geometry
-#     kspec.shape = (enmap_template.shape[-2], enmap_template.shape[-1])
-#     kspec.ncomp = 3 if enmap_template.shape[0] == 3 else 1
-#     kspec.Nsplits = N_splits
-#     kspec.wcs = enmap_template.wcs
-#     kspec.lmap = enmap_template.laxes(broadcastable=True)
-#     kspec.ly, kspec.lx = enmap_template.laxes()
-#     kspec.lymap, kspec.lxmap = enmap_template.lmap()
-#     kspec.modlmap = enmap_template.modlmap().astype(np.float32)
-#     kspec.lwcs = enmap.lwcs(kspec.shape, kspec.wcs)
-#     kspec.llims = (min(kspec.lx), max(kspec.lx), min(kspec.ly), max(kspec.ly))
-#     kspec.thetamap = np.rad2deg(np.arctan2(kspec.lymap, kspec.lxmap))
+    spec2d_trim = spec2d.copy()
+    spec2d_trim.trim_at_ell(lmax)
+    
+    mArray_zeros = np.zeros(shape=(len(bin_low),len(bin_low)))
 
-#     # start with kmaps
-#     kspec.kmaps = [enmap.fft(enmap_) for enmap_ in enmap_list]
+    mArrays = {
+        trig: mArray_zeros.copy() for trig in powsum_maps.keys()
+    }
 
-#     kspec.kmaps_dict = {
-#         "T": [kmap[0] for kmap in kspec.kmaps],
-#         "Q": [kmap[1] for kmap in kspec.kmaps],
-#         "U": [kmap[2] for kmap in kspec.kmaps],
-#     }
+    for j in range(len(bin_low)):
+        modlmap_trimmed = spec2d_trim.modlmap
+        location = np.where(
+            (modlmap_trimmed >= bin_low[j]) &\
+            (modlmap_trimmed <= bin_high[j])
+        )
+        binMapTrim = spec2d_trim.pow_win.copy()*0.
+        binMapTrim[location] = 1.
+        # binMapTrim[location] *= np.nan_to_num(1./(powerMaskHolderTrim.modlmap[location])**powerOfL)
+        for trig in powsum_maps.keys():
+            for i in range(len(powsum_maps[trig])):
+                newMap = powsum_maps[trig][i].copy()
+                result = (newMap * np.fft.ifftshift(binMapTrim)).sum()
+                mArrays[trig][i, j] = result
+    
+    return mArrays
 
-#     rot = enmap.qued_rotmat(kspec.lmap, spin=2)
-#     kmaps_EB = enmap.matmul(rot, kspec.kmaps[..., 1:2])
-#     # combine kmaps for kspecs cross and autos
-#     kspec.pow_crosses = []
-#     kspec.pow_autos = []
-#     kspec.pow = enmap.zeros(shape=enmap_template.shape, wcs=kspec.lwcs)
-#     kspec.pow_auto = enmap.zeros(shape=enmap_template.shape, wcs=kspec.lwcs)
-#     for i1, i2 in itertools.combinations_with_replacement(range(N_splits), r=2):
-#         assert test_same_geometry(
-#             enmap_list[i1], enmap_list[i2]
-#         ), "All maps must have same geometry"
+def get_mode_coupling_2D(mArrays, spec2d):
 
-#         # if kspec.ncomp==1:
-#         #     pow_iter = (kspec.kmaps[i1] * np.conj(kspec.kmaps[i2])).real * kspec.modlmap**2
-#         # elif kspec.ncomp==3:
-#         #     pow_iter = enmap.zeros(shape=kspec.kmaps[0].shape, wcs=kspec.kmaps[0].wcs)
-#         #     for i in range(3):
-#         #         pow_iter[i] = (kspec.kmaps[i1][i] * np.conj(kspec.kmaps[i2][i])).real * kspec.modlmap**2
-#         pow_iter = (kspec.kmaps[i1] * np.conj(kspec.kmaps[i2])).real * kspec.modlmap**2
+    n = len(mArrays['0'])
 
-#         if i1 != i2:
-#             kspec.pow_crosses.append(pow_iter)
-#             kspec.pow += pow_iter
-#         elif i1 == i2:
-#             kspec.pow_autos.append(pow_iter)
-#             kspec.pow_auto += pow_iter
+    mcm = np.zeros((6*n, 6*n), dtype=mArrays['0'].dtype)
 
-#     # Divide by the number of iterations since we add all iterations
-#     kspec.pow /= N_splits * (N_splits - 1) / 2
-#     kspec.pow_auto /= N_splits
-#     kspec.pow_noise = (kspec.pow_auto - kspec.pow) / N_splits
+    mcm[0*n:1*n, 0*n:1*n] = mArrays['0']
 
-#     kspec.pow_maps = {}
-#     kspec.pow_auto_maps = {}
-#     kspec.pow_noise_maps = {}
+    mcm[1*n:2*n, 1*n:2*n] = mArrays['cos']
+    mcm[1*n:2*n, 2*n:3*n] = -mArrays['sin']
+    mcm[2*n:3*n, 1*n:2*n] = mArrays['sin']
+    mcm[2*n:3*n, 2*n:3*n] = mArrays['cos']
 
-#     # Create E and B kmaps from Q and U
-#     kspec.kmaps_EB = [
-#         enmap.zeros((2, *kspec.shape), kmap.wcs, dtype=np.complex128)
-#         for kmap in kspec.kmaps
-#     ]
-#     for i in range(len(kspec.kmaps_EB)):
-#         kspec.kmaps_EB[i][0] = kspec.kmaps[i][1] * np.cos(
-#             2 * np.deg2rad(kspec.thetamap)
-#         ) + kspec.kmaps[i][2] * np.sin(2 * np.deg2rad(kspec.thetamap))
-#         kspec.kmaps_EB[i][1] = kspec.kmaps[i][1] * np.sin(
-#             2 * np.deg2rad(kspec.thetamap)
-#         ) - kspec.kmaps[i][2] * np.cos(2 * np.deg2rad(kspec.thetamap))
-
-#     # combine kmaps for kspecs cross and autos
-#     kspec.pow_EB_crosses = []
-#     kspec.pow_EB_autos = []
-#     kspec.pow_EB = enmap.zeros(shape=(2, *kspec.shape), wcs=kspec.lwcs)
-#     kspec.pow_EB_auto = enmap.zeros(shape=(2, *kspec.shape), wcs=kspec.lwcs)
-#     for i1, i2 in itertools.combinations_with_replacement(range(kspec.Nsplits), r=2):
-
-#         pow_iter = (
-#             kspec.kmaps_EB[i1] * np.conj(kspec.kmaps_EB[i2])
-#         ).real * kspec.modlmap**2
-
-#         if i1 != i2:
-#             kspec.pow_EB_crosses.append(pow_iter)
-#             kspec.pow_EB += pow_iter
-#         elif i1 == i2:
-#             kspec.pow_EB_autos.append(pow_iter)
-#             kspec.pow_EB_auto += pow_iter
-
-#     # Divide by the number of iterations since we add all iterations
-#     kspec.pow_EB /= kspec.Nsplits * (kspec.Nsplits - 1) / 2
-#     kspec.pow_EB_auto /= kspec.Nsplits
-#     kspec.pow_EB_noise = (kspec.pow_EB_auto - kspec.pow_EB) / kspec.Nsplits
-
-#     return kspec
+    mcm[3*n:4*n, 3*n:4*n] = mArrays['cos2']
+    mcm[3*n:4*n, 4*n:5*n] = -2 * mArrays['cossin']
+    mcm[3*n:4*n, 5*n:6*n] = mArrays['sin2']
+    mcm[4*n:5*n, 3*n:4*n] = mArrays['cossin']
+    mcm[4*n:5*n, 4*n:5*n] = mArrays['cos2'] - mArrays['sin2']
+    mcm[4*n:5*n, 5*n:6*n] = -mArrays['cossin']
+    mcm[5*n:6*n, 3*n:4*n] = mArrays['sin2']
+    mcm[5*n:6*n, 4*n:5*n] = 2 * mArrays['cossin']
+    mcm[5*n:6*n, 5*n:6*n] = mArrays['cos2']
+    
+    return mcm / spec2d.patch_area
