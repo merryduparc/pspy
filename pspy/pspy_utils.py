@@ -243,7 +243,7 @@ def create_binning_file(bin_size, n_bins, lmax=None, file_name=None):
         f.close()
 
 
-def read_binning_file(file_name, lmax):
+def read_binning_file(file_name, lmax, start_at_two=True):
     """Read a binningFile and truncate it to lmax, if bin_low lower than 2, set it to 2.
     format is bin_low, bin_high, bin_mean
 
@@ -257,7 +257,7 @@ def read_binning_file(file_name, lmax):
     bin_low, bin_hi, bin_cent = np.loadtxt(file_name, unpack=True)
     id = np.where(bin_hi < lmax)
     bin_low, bin_hi, bin_cent = bin_low[id], bin_hi[id], bin_cent[id]
-    if bin_low[0] < 2:
+    if start_at_two and bin_low[0] < 2:
         bin_low[0] = 2
     bin_hi = bin_hi.astype(int)
     bin_low = bin_low.astype(int)
