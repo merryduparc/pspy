@@ -7,7 +7,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 from copy import deepcopy
 import pickle
-import fortran
 import itertools
 from astropy import wcs
 from tqdm import tqdm
@@ -17,6 +16,25 @@ from pspy.pspy_utils import read_binning_file
 def test_same_geometry(enmap_1, enmap_2):
     return enmap_1.shape == enmap_2.shape  # TODO : also check wcs
 
+def theta_range_to_wedge(theta_range:list[float], theta_map:np.ndarray):
+    """
+    From a theta range (in degree) and a theta map (in degree), return a binary map with 1 inside the wedge and 0 outside
+    """
+    wedge_map = theta_map.copy() * 0. + 1.
+    
+    if theta_range[0] >= 0:
+        theta_mask = np.where(
+            (theta_map % 180 < theta_range[0])
+            | (theta_map % 180 > theta_range[1])
+        )
+        wedge_map[theta_mask] = 0.
+    else:
+        theta_mask = np.where(
+            (theta_map % 180 < theta_range[0] % 180)
+            & (theta_map % 180 > theta_range[1])
+        )
+        wedge_map[theta_mask] = 0.
+    return wedge_map
 
 def trim_enmap_at_ell(
     lx: np.ndarray,
@@ -81,8 +99,10 @@ class So_Spec2D:
             self.maps = [maps * win for (maps, win) in zip(maps, windows)]
         self.windows = windows
         self.get_ellmaps()
-        self.get_kmaps()
-        self.get_2d_spectra(ell_index=ell_index)
+        self.Nsplits = len(self.maps)
+        if self.Nsplits != 0:
+            self.get_kmaps()
+            self.get_2d_spectra(ell_index=ell_index)
 
     def copy(self):
         return deepcopy(self)
@@ -91,10 +111,9 @@ class So_Spec2D:
         """
         Compute useful stuff (modlmap, thetamap etc.)
         """
-        enmap_template = self.maps[0]  # assume all map should have same geometry
+        enmap_template = self.maps[0] if len(self.maps) != 0 else self.windows[0]  # assume all map should have same geometry
         self.shape = (enmap_template.shape[-2], enmap_template.shape[-1])
         self.ncomp = 3 if enmap_template.shape[0] == 3 else 1
-        self.Nsplits = len(self.maps)
         self.wcs = enmap_template.wcs
         self.lmap = enmap_template.laxes(broadcastable=True)
         self.ly, self.lx = enmap_template.laxes()
@@ -116,7 +135,7 @@ class So_Spec2D:
 
         # Trim dict[str, list[enmap.ndmap]]
         for attr_name in ["kmaps"]:
-            maps_dict = getattr(self, attr_name)
+            maps_dict = getattr(self, attr_name, None)
             if maps_dict is not None:
                 maps_dict_trim = {
                     k: [
@@ -129,7 +148,7 @@ class So_Spec2D:
 
         # Trim dict[str, enmap.ndmap]
         for attr_name in ["pow", "pow_noise", "pow_auto"]:
-            maps_dict = getattr(self, attr_name)
+            maps_dict = getattr(self, attr_name, None)
             if maps_dict is not None:
                 maps_dict_trim = {
                     k: trim_enmap_at_ell(
@@ -141,7 +160,7 @@ class So_Spec2D:
 
         # Trim enmap.ndmap
         for attr_name in ["pow_win"]:
-            maps = getattr(self, attr_name)
+            maps = getattr(self, attr_name, None)
             if maps is not None:
                 maps_trim = trim_enmap_at_ell(
                     self.lx, self.ly, maps, ell_trim=ell_trim
@@ -204,7 +223,7 @@ class So_Spec2D:
     #     )
     #     pixW = pixW**2
 
-    def get_2d_spectra(self, ell_index=None, skip_useless=True):
+    def get_2d_spectra(self, ell_index=None, skip_useless=True, save_mem=True):
         """
         From kmaps, computes all power maps from kmaps combinations.
         Then makes mean of the cross and auto, and a noise power map.
@@ -232,10 +251,12 @@ class So_Spec2D:
             ):
                 pow_iter = (self.kmaps[Y][i2] * np.conj(self.kmaps[X][i1])).real
                 if i1 != i2:
-                    self.pow_crosses[X + Y].append(pow_iter)
+                    if not save_mem:
+                        self.pow_crosses[X + Y].append(pow_iter)
                     self.pow[X + Y] += pow_iter
                 elif i1 == i2:
-                    self.pow_autos[X + Y].append(pow_iter)
+                    if not save_mem:
+                        self.pow_autos[X + Y].append(pow_iter)
                     self.pow_auto[X + Y] += pow_iter
 
             # Divide by the number of iterations to obtain the mean
@@ -250,6 +271,8 @@ class So_Spec2D:
             self.pow[X + Y] *= fac
             self.pow_auto[X + Y] *= fac
             self.pow_noise[X + Y] *= fac
+        if save_mem:
+            del self.kmaps
 
     def axplot(
         self,
@@ -350,7 +373,8 @@ class So_Spec2D:
 
         rad_bin_spec = {}  # Cls or Dls
         for spec, smap in smap_dict.items():
-            smap_flatten = smap.flatten()[theta_mask]
+            with np.errstate(all = 'ignore'):
+                smap_flatten = smap.flatten()[theta_mask].astype(np.float64)
 
             # Create a map of where bins are
             bin_map = np.digitize(self.modlmap, bin_edges, right=True)
@@ -359,7 +383,7 @@ class So_Spec2D:
             # Bin the map and divide by the occupation number
             bincount = np.bincount(bin_map_flatten)
             rbin_map = np.bincount(
-                bin_map_flatten, weights=smap_flatten.astype(np.float64)
+                bin_map_flatten, weights=smap_flatten
             )
             bins_center = (bin_edges[:-1] + bin_edges[1:]) / 2
             rad_bin_spec[spec] = (
@@ -431,9 +455,11 @@ def read_so_2dspec_pickle(filename: str):
         return pickle.load(f)
 
 
-def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float) -> dict[np.ndarray]:
+def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float, theta_range: list[float]=None) -> dict[np.ndarray]:
     """Computes the sums of binning maps times window spec using a fortran routine
     """
+    import fortran
+
     bin_low, bin_high, bin_cent, bin_size = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
 
     spec2d_wide = spec2d.copy()
@@ -445,6 +471,7 @@ def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float) -> dict[np
 
     lx = spec2d_wide.lx.copy()
     ly = spec2d_wide.ly.copy()
+    
 
     modlmap = spec2d_wide.modlmap.copy()
     
@@ -454,6 +481,12 @@ def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float) -> dict[np
     ang=np.fft.fftshift(np.arctan2(spec2d_trim.lymap,spec2d_trim.lxmap))
     cos_array=np.cos(-2*ang)
     sin_array=np.sin(-2*ang)
+
+    if theta_range is None:
+        weight_map = pow_shifted * 0. + 1
+    else:
+        weight_map = theta_range_to_wedge(theta_range=theta_range, theta_map=spec2d_wide.thetamap.copy())
+
 
     pMMaps_0 = np.zeros((len(bin_low), len(spec2d_trim.ly), len(spec2d_trim.lx)), dtype=np.float64)
     pMMaps_cos = pMMaps_0.copy()
@@ -487,7 +520,7 @@ def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float) -> dict[np
                 pmshift_22=pow_shifted.T,  # shifted, no trim
                 cos_array=cos_array.T,
                 sin_array=sin_array.T,
-                bmap=None,
+                bmap=weight_map.T,
                 bmap0=binMap0.T,  # shifted, trimmed
                 bmap_cos=binMap_cos.T,
                 bmap_sin=binMap_sin.T,
