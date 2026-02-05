@@ -364,6 +364,32 @@ def create_arbitrary_binning_file(delta_l_list, l_bound_list, binning_file=None)
     return lmin_list, lmax_list, lmean_list
 
 
+def binning_file_from_bin_edges(bin_edges, binning_file):
+    """
+    Builds a binning file from a 1D array that contains bin edges.
+    Nth bin goes from bin_edges[N-1] to bin_edges[N] - 1.
+    """
+    bin_low = bin_edges[:-1]
+    bin_hi = bin_edges[1:] - 1
+    bin_cent = (bin_low + bin_hi) / 2
+    bin_size = bin_hi - bin_low + 1
+
+    f = open("%s" % binning_file, mode="w")
+    for i in range(len(bin_low)):
+        f.write("%0.2f %0.2f %0.2f\n" % (bin_low[i], bin_hi[i], bin_cent[i]))
+    f.close()
+
+
+def bin_edges_from_binning_file(binning_file, lmax):
+    """
+    From a binning file, returns the bin edges as defined in binning_file_from_bin_edges
+    """
+    bin_low, bin_high, _, _ = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
+
+    bin_edges = list(bin_low)
+    bin_edges.append(bin_high[-1] + 1)
+    return np.array(bin_edges)
+
 
 def is_symmetric(mat, tol=1e-8):
     """
