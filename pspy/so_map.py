@@ -412,7 +412,7 @@ class so_map:
 
 
 
-def read_map(file, coordinate=None, fields_healpix=None, car_box=None, geometry=None):
+def read_map(file, coordinate=None, fields_healpix=None, car_box=None, geometry=None, remove_unseen=True):
     """Create a ``so_map`` object from a fits file.
 
     Parameters
@@ -423,18 +423,34 @@ def read_map(file, coordinate=None, fields_healpix=None, car_box=None, geometry=
       coordinate system of the map
     fields_healpix: integer
       if fields_healpix is not None, load the specified field
-    car_box:  2x2 array
+    car_box: 2x2 array
         [[dec0,ra0],[dec1,ra1]] in degree
-
+    geometry: tuple, optional
+	    Desired output geometry (shape, wcs) to extract the data on to.
+	    The output geometry must be WCS-compatible with the geometry
+	    on disk.
+    remove_unseen: boolean
+        set the unseen healpix pixel to zero
     """
 
     new_map = so_map()
     hdulist = pyfits.open(file)
     try:
         header = hdulist[1].header
+
         new_map.pixel = "HEALPIX"
         if fields_healpix is None:
-            new_map.ncomp = header["TFIELDS"]
+
+            # Handle "PARTIAL" HEALPix maps (common in surveys like SPT).
+            # In this format, the first FITS column is the pixel index, not data.
+            # We subtract 1 from TFIELDS to get the actual number of physical components.
+            
+            object_type = header.get("OBJECT", "").upper()
+            if object_type == "PARTIAL":
+                new_map.ncomp = header["TFIELDS"] - 1
+            else:
+                new_map.ncomp = header["TFIELDS"]
+        
             new_map.data = hp.fitsfunc.read_map(file, field=np.arange(new_map.ncomp))
         else:
             try:
@@ -448,6 +464,9 @@ def read_map(file, coordinate=None, fields_healpix=None, car_box=None, geometry=
             new_map.coordinate = header["SKYCOORD"]
         except:
             new_map.coordinate = None
+            
+        if remove_unseen:
+            new_map.data[new_map.data == hp.UNSEEN] = 0
 
     except:
         header = hdulist[0].header
