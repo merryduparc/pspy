@@ -260,7 +260,7 @@ class So_Spec2D:
                     self.pow_auto[X + Y] += pow_iter
 
             # Divide by the number of iterations to obtain the mean
-            self.pow[X + Y] /= self.Nsplits * (self.Nsplits - 1) / 2
+            self.pow[X + Y] /= max([self.Nsplits * (self.Nsplits - 1) / 2, 1])
             self.pow_auto[X + Y] /= self.Nsplits
             self.pow_noise[X + Y] = (
                 self.pow_auto[X + Y] - self.pow[X + Y]
@@ -302,7 +302,7 @@ class So_Spec2D:
             map_to_plot = map_to_plot.downgrade(downgrade)
 
         if log:
-            map_to_plot = np.log10(map_to_plot.astype(np.float64))
+            map_to_plot = np.log10(map_to_plot.real.astype(np.float64))
 
         plot = ax_to_plot.imshow(
             np.fft.fftshift(map_to_plot.real.astype(np.float64)),
@@ -320,22 +320,26 @@ class So_Spec2D:
         ax_to_plot.set_ylabel(r"$\ell_y$")
         return plot
 
-    def radial_binned_map(      # TODO : change bin_edges for a binning_file
+    def radial_binned_map( 
         self,
-        bin_edges: np.ndarray,
+        binning_file: str,
+        lmax: int,
         which_map: dict[str, enmap.ndmap] = None,
         TQU: str = None,
     ) -> enmap.ndmap:
         """Bins a given map (self.pow by default).
 
         Args:
-            bin_edges (_type_): ell-indices for separation between bins
+            binning_file (_type_): binning file to use
+            lmax: where to cut the binning file
             which_map (_type_, optional): Must have same pixellization as self.pow. If None uses self.pow.
             TQU (_type_, optional): If ncomp=3, choose which one to use between to I, Q and U. If None uses I.
 
         Returns:
             _type_: _description_
         """
+        bin_lo, bin_hi, bin_c, bin_size = read_binning_file(binning_file, lmax)
+        
         which_map = self.pow if which_map is None else which_map
 
         rad_binned_map: dict[str, enmap.ndmap] = {}
@@ -344,7 +348,7 @@ class So_Spec2D:
             smap_flatten = spec_map.flatten()
 
             # Create a map of where bins are
-            bin_map = np.digitize(self.modlmap, bin_edges, right=True)
+            bin_map = np.digitize(self.modlmap, np.concatenate([[bin_lo[0]], bin_hi]), right=True)
             bin_map_flatten = bin_map.flatten()
 
             # Bin the map and divide by the occupation number
@@ -353,12 +357,14 @@ class So_Spec2D:
             rad_binned_map[comp] = (rbin_map / bincount)[bin_map]
         return rad_binned_map
 
-    def radial_binned_1d_spec(      # TODO : change bin_edges for a binning_file
-        self, bin_edges, which_map=None, theta_range=None
+    def radial_binned_1d_spec(
+        self, binning_file: str, lmax: int, which_map=None, theta_range=None
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         makes a 1D power spectra from power map
         """
+        
+        bin_lo, bin_hi, bin_c, bin_size = read_binning_file(binning_file, lmax)
 
         if type(which_map) != dict and which_map is not None:
             which_map = {"I": which_map}
@@ -374,10 +380,10 @@ class So_Spec2D:
         rad_bin_spec = {}  # Cls or Dls
         for spec, smap in smap_dict.items():
             with np.errstate(all = 'ignore'):
-                smap_flatten = smap.flatten()[theta_mask].astype(np.float64)
+                smap_flatten = smap.flatten()[theta_mask].real.astype(np.float64)
 
             # Create a map of where bins are
-            bin_map = np.digitize(self.modlmap, bin_edges, right=True)
+            bin_map = np.digitize(self.modlmap, np.concatenate([[bin_lo[0]], bin_hi]), right=True)
             bin_map_flatten = bin_map.flatten()[theta_mask]
 
             # Bin the map and divide by the occupation number
@@ -385,17 +391,16 @@ class So_Spec2D:
             rbin_map = np.bincount(
                 bin_map_flatten, weights=smap_flatten
             )
-            bins_center = (bin_edges[:-1] + bin_edges[1:]) / 2
             rad_bin_spec[spec] = (
                 rbin_map[1:-1] / bincount[1:-1]
             )  # First bin is before the first bin edge and last one is after last bin edge
-        return bins_center, rad_bin_spec
+        return bin_c, rad_bin_spec
 
-    def subtract_rad_profile(self, bin_edges, inplace=False):
+    def subtract_rad_profile(self, binning_file:str, lmax:int, inplace=False):
         """
         Subtract the radial profile of a map (using self.radial_binned_map)
         """
-        rad_binned_map = self.radial_binned_map(bin_edges)
+        rad_binned_map = self.radial_binned_map(binning_file, lmax)
         pow_subtracted = self.pow - rad_binned_map
         if not inplace:
             return pow_subtracted
@@ -409,6 +414,7 @@ class So_Spec2D:
 
 def make_1d_spectra_and_save(spec2d: So_Spec2D, bin_edges, theta_ranges, filename):
     # TODO: change this so it save with so_spectra.write_ps instead
+    # TODO: deprecate this ?
     ls = (bin_edges[1:] + bin_edges[:-1]) / 2
     # Start with saving 1d radial power spectra and noise spectra
     ps_full = {}
@@ -465,7 +471,7 @@ def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float, theta_rang
     spec2d_wide = spec2d.copy()
     spec2d_wide.trim_at_ell(2 * lmax + 500)
 
-    pow_shifted = np.fft.fftshift(spec2d_wide.pow_win.astype(np.float64))
+    pow_shifted = np.fft.fftshift(spec2d_wide.pow_win.real.astype(np.float64))
     lx_shifted = np.fft.fftshift(spec2d_wide.lx.copy())
     ly_shifted = np.fft.fftshift(spec2d_wide.ly.copy())
 
