@@ -210,18 +210,19 @@ class So_Spec2D:
         """
         kmap_win = (
             enmap.fft(self.windows[0], normalize="phys")
-        )  # TODO: make this work for different windows
+        )  # TODO: make this work for different windows?
         self.pow_win = (kmap_win * np.conj(kmap_win)).real
         fac = 1.0 if ell_index is None else (self.modlmap**ell_index)
         fac *= (self.patch_area / (4 * np.pi))
         self.pow_win *= fac
         
     # TODO make this one work
-    # def get_pixel_window(self): 
-    #     pixW = np.sinc(self.lx[self.ix] * self.pixScaleX / (2.0 * np.pi)) * np.sinc(
-    #         self.ly[self.iy] * self.pixScaleY / (2.0 * np.pi)
-    #     )
-    #     pixW = pixW**2
+    def get_pixel_window(self):
+        pixW = np.sinc(self.lx[self.ix] * np.diff(self.lx)[0] / (2.0 * np.pi)) * np.sinc(
+            self.ly[self.iy] * self.pixScaleY / (2.0 * np.pi)
+        )
+        pixW = pixW**2
+        return pixW
 
     def get_2d_spectra(self, ell_index=None, skip_useless=True, save_mem=True):
         """
@@ -325,7 +326,6 @@ class So_Spec2D:
         binning_file: str,
         lmax: int,
         which_map: dict[str, enmap.ndmap] = None,
-        TQU: str = None,
     ) -> enmap.ndmap:
         """Bins a given map (self.pow by default).
 
@@ -348,7 +348,7 @@ class So_Spec2D:
             smap_flatten = spec_map.flatten()
 
             # Create a map of where bins are
-            bin_map = np.digitize(self.modlmap, np.concatenate([[bin_lo[0]], bin_hi]), right=True)
+            bin_map = np.digitize(self.modlmap, np.concatenate([bin_lo, [lmax]]), right=True)
             bin_map_flatten = bin_map.flatten()
 
             # Bin the map and divide by the occupation number
@@ -358,7 +358,7 @@ class So_Spec2D:
         return rad_binned_map
 
     def radial_binned_1d_spec(
-        self, binning_file: str, lmax: int, which_map=None, theta_range=None
+        self, binning_file: str, lmax: int, which_map=None, theta_range=None, spec_type="Cl"
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         makes a 1D power spectra from power map
@@ -368,7 +368,11 @@ class So_Spec2D:
 
         if type(which_map) != dict and which_map is not None:
             which_map = {"I": which_map}
+        
         smap_dict: dict[str, enmap.ndmap] = self.pow if which_map is None else which_map
+
+        if spec_type == "Dl":
+            smap_dict = {k: m * self.modlmap * (self.modlmap + 1) / (2* np.pi) for k, m in smap_dict.items()}
 
         # Define a mask in kspace using theta map
         theta_range = [0, 180] if theta_range is None else theta_range
@@ -378,14 +382,13 @@ class So_Spec2D:
         )
 
         rad_bin_spec = {}  # Cls or Dls
-        for spec, smap in smap_dict.items():
-            with np.errstate(all = 'ignore'):
+        for spec, smap in smap_dict.items():        # TODO: speedup with numpy instead of for loop
+            with np.errstate(all = 'ignore'):   # ignore warnings "casting complex into float blablabla"
                 smap_flatten = smap.flatten()[theta_mask].real.astype(np.float64)
 
             # Create a map of where bins are
-            bin_map = np.digitize(self.modlmap, np.concatenate([[bin_lo[0]], bin_hi]), right=True)
+            bin_map = np.digitize(self.modlmap, np.concatenate([bin_lo, [lmax]]), right=True)
             bin_map_flatten = bin_map.flatten()[theta_mask]
-
             # Bin the map and divide by the occupation number
             bincount = np.bincount(bin_map_flatten)
             rbin_map = np.bincount(
@@ -503,7 +506,11 @@ def get_powsum_maps(spec2d:So_Spec2D, binning_file: str, lmax: float, theta_rang
 
     for ibin in tqdm(range(len(bin_low)), desc='Looping over bins ', smoothing=1.):
 
-        location = np.where((modlmap >= bin_low[ibin]) & (modlmap <= bin_high[ibin]))
+        # location = np.where((modlmap >= bin_low[ibin]) & (modlmap <= np.concatenate([bin_low, [lmax]])[ibin+1]))
+        location = np.where(
+            np.digitize(modlmap, np.concatenate([bin_low, [lmax]]), right=True)
+            == ibin
+        )
 
         binMap = pow_shifted.copy() * 0.
         binMap[location] = 1. # shifed
@@ -573,8 +580,10 @@ def get_trig_M_arrays(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_fi
     for j in range(len(bin_low)):
         modlmap_trimmed = spec2d_trim.modlmap
         location = np.where(
-            (modlmap_trimmed >= bin_low[j]) &\
-            (modlmap_trimmed <= bin_high[j])
+            # (modlmap_trimmed >= bin_low[j]) &\
+            # (modlmap_trimmed <= bin_high[j])
+            np.digitize(modlmap_trimmed, np.concatenate([bin_low, [lmax]]), right=True)
+            == j
         )
         binMapTrim = spec2d_trim.pow_win.copy()*0.
         binMapTrim[location] = 1.
@@ -589,25 +598,61 @@ def get_trig_M_arrays(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_fi
 
 def get_mode_coupling_2D(mArrays, spec2d) -> np.ndarray:
 
-    n = len(mArrays['0'])
+    n = mArrays['0'].shape[0]
+    m = mArrays['0'].shape[1]
 
-    mcm = np.zeros((6*n, 6*n), dtype=mArrays['0'].dtype)
+    mcm = np.zeros((6*n, 6*m), dtype=mArrays['0'].dtype)
 
-    mcm[0*n:1*n, 0*n:1*n] = mArrays['0']
+    mcm[0*n:1*n, 0*m:1*m] = mArrays['0']
 
-    mcm[1*n:2*n, 1*n:2*n] = mArrays['cos']
-    mcm[1*n:2*n, 2*n:3*n] = -mArrays['sin']
-    mcm[2*n:3*n, 1*n:2*n] = mArrays['sin']
-    mcm[2*n:3*n, 2*n:3*n] = mArrays['cos']
+    mcm[1*n:2*n, 1*m:2*m] = mArrays['cos']
+    mcm[1*n:2*n, 2*m:3*m] = -mArrays['sin']
+    mcm[2*n:3*n, 1*m:2*m] = mArrays['sin']
+    mcm[2*n:3*n, 2*m:3*m] = mArrays['cos']
 
-    mcm[3*n:4*n, 3*n:4*n] = mArrays['cos2']
-    mcm[3*n:4*n, 4*n:5*n] = -2 * mArrays['cossin']
-    mcm[3*n:4*n, 5*n:6*n] = mArrays['sin2']
-    mcm[4*n:5*n, 3*n:4*n] = mArrays['cossin']
-    mcm[4*n:5*n, 4*n:5*n] = mArrays['cos2'] - mArrays['sin2']
-    mcm[4*n:5*n, 5*n:6*n] = -mArrays['cossin']
-    mcm[5*n:6*n, 3*n:4*n] = mArrays['sin2']
-    mcm[5*n:6*n, 4*n:5*n] = 2 * mArrays['cossin']
-    mcm[5*n:6*n, 5*n:6*n] = mArrays['cos2']
+    mcm[3*n:4*n, 3*m:4*m] = mArrays['cos2']
+    mcm[3*n:4*n, 4*m:5*m] = -2 * mArrays['cossin']
+    mcm[3*n:4*n, 5*m:6*m] = mArrays['sin2']
+    mcm[4*n:5*n, 3*m:4*m] = mArrays['cossin']
+    mcm[4*n:5*n, 4*m:5*m] = mArrays['cos2'] - mArrays['sin2']
+    mcm[4*n:5*n, 5*m:6*m] = -mArrays['cossin']
+    mcm[5*n:6*n, 3*m:4*m] = mArrays['sin2']
+    mcm[5*n:6*n, 4*m:5*m] = 2 * mArrays['cossin']
+    mcm[5*n:6*n, 5*m:6*m] = mArrays['cos2']
     
-    return mcm / spec2d.patch_area
+    return mcm
+
+def get_binning_matrices(powsum_maps:dict[np.ndarray], spec2d:So_Spec2D, binning_file: str, lmax: float, mArrays:dict):
+    
+    # minimum ell resolution of maps for per-ell binning
+    delta = np.minimum(
+        abs(spec2d.lx[1] - spec2d.lx[0]),
+        abs(spec2d.ly[1] - spec2d.ly[0]),
+    )
+    bin_low, bin_high, bin_cent, bin_size = read_binning_file(binning_file, lmax=lmax, start_at_two=False)
+
+    spec2d_trim = spec2d.copy()
+    spec2d_trim.trim_at_ell(lmax)
+    
+    larray = np.arange(2, lmax)
+    bbls_zeros = np.zeros(shape=(len(bin_low),len(larray)))
+    bbls = {
+        trig: bbls_zeros.copy() for trig in powsum_maps.keys()
+    }
+    for k, ell_k in enumerate(larray):
+        
+        gauss_array = np.exp(-(larray-ell_k)**2./(2.*delta**2.))
+        sum = gauss_array.sum()
+        gauss_map = np.exp(-(spec2d_trim.modlmap-ell_k)**2./(2.*delta**2.))
+        gauss_map /= sum
+        
+        for trig in powsum_maps.keys():
+            for i in range(len(powsum_maps[trig])):
+                newMap = powsum_maps[trig][i].copy()
+                result = (newMap * np.fft.ifftshift(gauss_map)).sum()
+                bbls[trig][i, k] = result
+    
+    for trig in powsum_maps.keys():
+        bbls[trig] = np.dot(np.linalg.inv(mArrays[trig]), bbls[trig])
+    
+    return bbls
